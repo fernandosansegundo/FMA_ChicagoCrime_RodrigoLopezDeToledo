@@ -1,0 +1,779 @@
+---
+title: "Proyecto_FMA_ChicagoCrime"
+author: "Rodrigo Lopez de Toledo"
+date: "10/26/2020"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# *Análisis del crimen en la ciudad de Chicago en los últimos 5 años*
+
+## *Introducción*
+
+Como se sabe simplemente siguiendo las noticias, la ciudad de Chicago es una de las mas criminalizadas de los Estados Unidos y, por tanto, del mundo. Por conocimiento popular, se asume desde hace mucho tiempo que la mayoria de crímenes violentos se concentran en los barrios del sur, casualmente los mas pobres de toda la ciudad. En este análisis se busca confirmar esa teoría o si en cambio, la distribución de crímenes es mas homogénea por la ciudad de lo que se piensa.
+
+**Los datos se leen desde BigQuery en Google Cloud Platform** Yo he leido los datos y guardado en un .csv con el script que hay en esta misma carpeta llamado **AdquisicionDeDatos.R**
+Hay que mencionar que la tabla original contiene mas de 3 millones de filas de todos los años. Se seleccionan los últimos 5 años para poder hacer el procesamiento bien sin que la carga sobre el ordenador llegue al límite.
+
+Una segunda tabla de datos llamada PoliceDistricts.csv se usa para obtener las localizaciones de los diferentes distritos, necesario para algunos análisis.
+
+## *Lectura de los datos* 
+
+Lo primero es leer los datos e importar las librerias y hacer una exploracion inicial con "Summary" y "Head"
+
+```{r}
+library(dplyr)
+library(data.table)
+library(DataExplorer)
+library(tidyverse)
+library(sqldf)
+library("leaflet")
+library("data.table")
+library("sp")
+library("rgdal")
+library("KernSmooth")
+library(ggmap)
+library(kableExtra)
+library(leaflet)
+library(plotly)
+library(tidyverse)
+library(RColorBrewer)
+library(ggplot2)
+library(viridis)
+library(magrittr)
+library(tidyr)
+
+```
+```{r}
+chicago_crime <- read.table(file = "Datos/ChicagoCrime_5years.csv", #Name of text file.
+                      sep = ",",                       #Separation character.
+                      header = TRUE,                   #If column names are in the first row.
+                      na.strings = "NA",               #Character to be marked as missing value.
+                      stringsAsFactors = FALSE)
+
+police_districts <- read.table(file = "Datos/Police_Stations.csv", #Name of text file.
+                      sep = ",",                       #Separation character.
+                      header = TRUE,                   #If column names are in the first row.
+                      na.strings = "NA",               #Character to be marked as missing value.
+                      stringsAsFactors = FALSE)
+summary(chicago_crime)
+head(chicago_crime)
+
+summary(police_districts)
+head(police_districts)
+```
+
+
+En la tabla se puede ver variables que podrían ser muy útiles a la hora de ver la distribución crímenes por la ciudad, como puede ser el tipo de crímen, el distrito o si se ha producido arresto o no. Además, obtenemos la localización de cada crimen para poder ponerlo en algún mapa.
+
+## *Limpieza de Datos*
+
+### Cambios de Formato
+
+Como se observa del apartado anterior, hay muchos caracteres especiales que considero que hay que cambiar a descripciones mas simples. Tambien puede ser de utilidad dividir las fechas en día, mes y año, para poder hacer análisis mas en detalle. Para cambiar las descripciones usamos la funcion *gsub()* y para dividir las fechas usamos *lubridate*.
+
+```{r}
+chicago_crime$location_description <- (gsub(","," ",chicago_crime$location_description))
+chicago_crime$description <- gsub(":=","",chicago_crime$description)
+chicago_crime$description <- gsub(":","",chicago_crime$description)
+chicago_crime$description <- gsub("MANU/POSS. W/","",chicago_crime$description)
+chicago_crime$description <- gsub(",","",chicago_crime$description)
+chicago_crime$location_description <- gsub("(E.G.  UBER  LYFT)","",chicago_crime$location_description)
+chicago_crime$location_description <- gsub(",","",chicago_crime$location_description)
+
+chicago_crime <- chicago_crime %>%
+    dplyr::mutate(year = lubridate::year(date), 
+                month = lubridate::month(date), 
+                day = lubridate::day(date))
+
+head(chicago_crime)
+```
+### Hay valores nulos?
+
+Usando la funcion *plot_missing()* de *DataExplorer* nos muestra si hay valores nulos en cualquiera de las variables. 
+
+```{r}
+plot_missing(chicago_crime)
+
+chicago_crime <- na.omit(chicago_crime)
+```
+
+Como se ve en el gráfico, si que faltan datos. Como son muy pocos sobre el total, no creo que afecten mucho sobre el análisis eliminarlos, por lo que uso *na.omit()* para eliminar esas filas.
+
+### Agrupacion de Crimenes y cambios de formato
+
+Como hay muchísimos tipos de crimenes, para hecer un análisis suficientemente buen, creo que simplificaría las cosas agrupar todos los posibles crimenes en 8 grupos. Esos grupos son: *Assault, Criminal Damage, Deceptive Practice, Narcotics, Robbery, Theft, Violent Crime y Weapons Violation*.
+
+Seleccionaremos un subset (chicago_crime_subset) con esos grupos, quedando la reduccion de crimenes como se ilustran en los siguientes histogramas. Comprobando ademas que no faltan datos.
+
+En cuanto a la tabla de distritos policiales, se cambia el distrito "HeadQuarters" por el "0", para que todos sean numéricos.
+
+```{r}
+chicago_crime$primary_type[chicago_crime$primary_type == "CRIMINAL TRESPASS"] <- "ROBBERY"
+chicago_crime$primary_type[chicago_crime$primary_type == "BURGLARY"] <- "ROBBERY"
+chicago_crime$primary_type[chicago_crime$primary_type == "MOTOR VEHICLE THEFT"] <- "THEFT"
+chicago_crime$primary_type[chicago_crime$primary_type == "HOMICIDE"] <- "VIOLENT CRIME"
+chicago_crime$primary_type[chicago_crime$primary_type == "KIDNAPPING"] <- "VIOLENT CRIME"
+chicago_crime$primary_type[chicago_crime$primary_type == "BATTERY"] <- "VIOLENT CRIME"
+chicago_crime$primary_type[chicago_crime$primary_type == "INTIMIDATION"] <- "VIOLENT CRIME"
+chicago_crime$primary_type[chicago_crime$primary_type == "ARSON"] <- "VIOLENT CRIME"
+chicago_crime$primary_type[chicago_crime$primary_type == "PROSTITUTION"] <- "SEX OFFENSE"
+chicago_crime$primary_type[chicago_crime$primary_type == "CRIM SEXUAL ASSAULT"] <- "SEX OFFENSE"
+chicago_crime$primary_type[chicago_crime$primary_type == "OTHER NARCOTIC VIOLATION"] <- "NARCOTICS"
+chicago_crime$primary_type <- factor(chicago_crime$primary_type)
+chicago_crime$district <- factor(chicago_crime$district)
+
+police_districts$DISTRICT[police_districts$DISTRICT == "Headquarters"] <- "0"
+police_districts$DISTRICT <- as.factor(police_districts$DISTRICT)
+
+chicago_crime_subset <- subset(chicago_crime, primary_type=="ASSAULT" | primary_type == "VIOLENT CRIME" | primary_type == "THEFT" | primary_type=="NARCOTICS" | primary_type == "WEAPONS VIOLATION" | primary_type=="ROBBERY" | primary_type == "CRIMINAL DAMAGE" | primary_type == "DECEPTIVE PRACTICE" )
+
+chicago_crime_subset$primary_type <- factor(chicago_crime_subset$primary_type)
+chicago_crime_subset$district <- factor(chicago_crime_subset$district)
+chicago_crime_subset <- na.omit(chicago_crime_subset)
+
+plot_missing(chicago_crime_subset)
+
+ggplot(data = chicago_crime) +
+  geom_bar(mapping = aes(x = primary_type)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("Crímenes Originales")
+
+ggplot(data = chicago_crime_subset) +
+  geom_bar(mapping = aes(x = primary_type)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("Crímenes del Subset")
+```
+
+En el último histograma se muestra la distribución de los crímenes con los que se va a trabajar. Es importante entender la diferencia de cantidad de casos entre los crímenes para el análisis que se va a realizar, ya que las comparaciones, probabilidades y conclusiones pueden acentuarse mas o menos dependiendo en la cantidad de casos de cada crímen.
+
+Comprobando las dimensiones vemos como no hay una gran diferencia en numero de casos sobre el total, por lo que la agrupación es bastante favorable
+
+```{r}
+dim(chicago_crime)
+dim(chicago_crime_subset)
+```
+
+Hacemos ahora diferentes subsets de cada crímen para analisis mas en detalle, que puede ser bastante útil. Esto puede ser muy útil para ver en que distritos se producen mas crímenes de un tipo, como se ve en los histogramas generados.
+
+```{r}
+assault <- subset(chicago_crime_subset, primary_type=="ASSAULT")
+violent_crime <- subset(chicago_crime_subset, primary_type=="VIOLENT CRIME")
+theft <- subset(chicago_crime_subset, primary_type=="THEFT")
+narcotics <- subset(chicago_crime_subset, primary_type=="NARCOTICS")
+weapons_violation <- subset(chicago_crime_subset, primary_type=="WEAPONS VIOLATION")
+robbery <- subset(chicago_crime_subset, primary_type=="ROBBERY")
+criminal_damage <- subset(chicago_crime_subset, primary_type=="CRIMINAL DAMAGE")
+deceptive_practice <- subset(chicago_crime_subset, primary_type=="DECEPTIVE PRACTICE")
+
+ggplot(data = assault) +
+  geom_bar(mapping = aes(x = district)) +
+  theme(axis.text.x = element_text(hjust = 1)) +
+  ggtitle("ASSAULT BY DISTRICT")
+
+ggplot(data = theft) +
+  geom_bar(mapping = aes(x = district)) +
+  theme(axis.text.x = element_text(hjust = 1)) +
+  ggtitle("THEFTS BY DISTRICT")
+
+ggplot(data = violent_crime) +
+  geom_bar(mapping = aes(x = district)) +
+  theme(axis.text.x = element_text(hjust = 1)) +
+  ggtitle("VIOLENT CRIMES BY DISTRICT")
+
+ggplot(data = narcotics) +
+  geom_bar(mapping = aes(x = district)) +
+  theme(axis.text.x = element_text(hjust = 1)) +
+  ggtitle("NARCOTIC CRIMES BY DISTRICT")
+
+ggplot(data = weapons_violation) +
+  geom_bar(mapping = aes(x = district)) +
+  theme(axis.text.x = element_text(hjust = 1)) +
+  ggtitle("WEAPON-RELATED CRIMES BY DISTRICT")
+
+ggplot(data = robbery) +
+  geom_bar(mapping = aes(x = district)) +
+  theme(axis.text.x = element_text(hjust = 1)) +
+  ggtitle("ROBBERIES BY DISTRICT")
+
+ggplot(data = criminal_damage) +
+  geom_bar(mapping = aes(x = district)) +
+  theme(axis.text.x = element_text(hjust = 1)) +
+  ggtitle("CRIMINAL DAMAGE CRIMES BY DISTRICT")
+
+ggplot(data = deceptive_practice) +
+  geom_bar(mapping = aes(x = district)) +
+  theme(axis.text.x = element_text(hjust = 1)) +
+  ggtitle("DECEPTIVE PRACTICE CRIMES BY DISTRICT")
+```
+
+La ultima parte de la agrupacion es referida a distritos y arrestos. Voy a crear dos nuevas tablas con los casos donde no se ha dado ningún arresto y otras con los que sí se han dado arrestos.
+
+A continuación creo una tabla con los porcentajes de arrestos, y visualizo esta informacion junto a los crimenes de cada distrito y el porcentaje de arresto en cada uno de ellos.
+
+```{r}
+chicago_crime_subset$arrest <- factor(chicago_crime_subset$arrest)
+districts_true <- sqldf('SELECT district, AVG(latitude) as avg_latitude,AVG(longitude) as avg_longitude, count(*) as arrest FROM chicago_crime_subset WHERE arrest LIKE "TRUE" GROUP BY district ORDER BY district')
+districts_false <- sqldf('SELECT district, AVG(latitude) as avg_latitude,AVG(longitude) as avg_longitude, count(*) as no_arrest FROM chicago_crime_subset WHERE arrest LIKE "FALSE" GROUP BY district ORDER BY district')
+districts_true$arrest <- as.numeric(districts_true$arrest)
+districts_false$no_arrest <- as.numeric(districts_false$no_arrest)
+
+arrest_percentage <- data.frame('District' = districts_false$district, 'PctArrest' = districts_true$arrest/(districts_true$arrest + districts_false$no_arrest), 'Crimes' = (districts_true$arrest + districts_false$no_arrest))
+
+head(districts_false)
+head(districts_true)
+head(arrest_percentage)
+
+ggplot(data = arrest_percentage) +
+  geom_col(mapping = aes(x = District, y = Crimes)) +
+  geom_line(aes(x = District, y = PctArrest*100000, group = 1), color = "yellow") +
+  scale_y_continuous(sec.axis = sec_axis(~./100000, name = "PctArrest")) +
+  theme(axis.text.x = element_text(hjust = 1))
+```
+
+En un mapa se ve donde esta cada distrito.
+
+```{r}
+setDT(districts_false)
+
+chicago <- get_stamenmap(bbox = c(left = -88.0225, bottom = 41.5949, 
+                                  right = -87.2713, top = 42.0677), 
+                         zoom = 11)
+ggmap(chicago) +
+geom_text(aes(x = LONGITUDE, y = LATITUDE, label = DISTRICT), data = police_districts)
+```
+
+## CONCLUSIONES I:
+
+Se puede ver la distribucion de los crímenes por distrito, deduciendo que crimen es mas "popular" en que distrito, además con ayuda del mapa de distritos, vemos por donde se situan mas o menos.
+
+  - *ASSAULT*: El reparto parece mas o menos homogeneo, pero hay un mayor numero de crimenes en los distritos 4,6,7,8 y 11, situados al sur y oeste de la ciudad. Hay tambien un número considerable de asaltos en el centro y norte (A lo largo de la costa) de la ciudad.
+  - *CRIMINAL DAMAGE*: En los delitos de daños, pasa similar a asaltos, pero claramente hay un distrito que sobresale, siendo este el distrito 8, situado al sur-oeste de la ciudad.
+  - *DECEPTIVE PRACTICE*: Estos crimenes están claramente localizados en el centro y norte de la ciudad, las zonas mas ricas de la ciudad. Justo este crímen no es un crimen violento.
+  - *NARCOTICS*: Este es el crímen mas claro de todos, prácticamente la totalidad de los crimenes se producen en os distritos 10,11 (El que mas con diferencia) y 15, al oeste de la ciudad.
+  - *ROBBERY*: El reparto de este crimen es prácticament igual al de asaltos, con la salvedad que el distrito 8 tiene mas incidencia que el resto.
+  - *THEFT*: Los robos sin violencia (Con violencia son ROBBERY), están bastante centrados en los distritos 1, 18 y 19, del centro y norte de la ciudad.
+  - *VIOLENT CRIMES*: La mayoria de estos crímenes estan en el distrito 11, el mas afectado por las drogas. Por el resto de los distritos esta repartido mas homogéneamente, habiendo mas por el sur y oeste.
+  - *WEAPON VIOLATON*: Los crímenes de armas están casi en su totalidad centrados en los distritos del sur y oeste (El 10 y 11).
+
+- *ARRESTOS*: En cuanto al porcentaje de arrestos, el mayor porcentaje se da en los distritos 10, 11 y 15, casualmente los mas afectados por narcoticos y crímenes violento, lo que parece indicar que estos crimenes son en los que mas arrestos hay. Salta a la vista que donde menos arrestos hay es en los distritos 1,2,18 y 19, los del centro, a pesar que hay un gran número de crímenes de robos y fraude (Deceptive Practice)
+
+Viendo los siguientes mapas si parece que estas conclusiones van por buen camino. En el único por el que no parece ir muy encaminado el análisis en en asalto, ya que como vemos hay casi mas en el centro y norte de la ciudad que en el sur. Hay una explicación para ello, que una vez se confirme el reparto explicaré.
+
+## *Distribucion De Crimenes y Arrestos*
+
+Para ampliar los histogramas de crimenes or distritos anteriores, se pueden visualizar esos números en el mapa, distribuidos por la ciudad.
+
+En los siguiente gráficos se ve sobre el mapa a distribucion de cada crimen por la ciudad. Contrastándolo con el mapa anterior se puede comprobar como afecta cada crimen en cada zona de la ciudad.
+
+```{r}
+# Por temas de limite de RAM, selecciono una muestra de 10000 casos, que para ilustrar tiene el mismo proposito.
+
+leaflet()%>%
+  addTiles() %>%
+    addMarkers(data = assault[1:10000, ], group = "Assault", clusterOptions = markerClusterOptions(),popup = ~primary_type) %>%
+    addMarkers(data = criminal_damage[1:10000, ], group = "Criminal Damage", clusterOptions = markerClusterOptions(),popup = ~primary_type) %>%
+    addMarkers(data = deceptive_practice[1:10000, ], group = "Deceptive Practice", clusterOptions = markerClusterOptions(),popup = ~primary_type) %>%
+    addMarkers(data = narcotics[1:10000, ], group = "Narcotics", clusterOptions = markerClusterOptions(),popup = ~primary_type) %>%
+    addMarkers(data = robbery[1:10000, ], group = "Robberies", clusterOptions = markerClusterOptions(),popup = ~primary_type) %>%
+    addMarkers(data = theft[1:10000, ], group = "Thefts", clusterOptions = markerClusterOptions(),popup = ~primary_type) %>%
+    addMarkers(data = violent_crime[1:10000, ], group = "Violent Crimes", clusterOptions = markerClusterOptions(),popup = ~primary_type) %>%
+    addMarkers(data = weapons_violation, group = "Weapon Violations", clusterOptions = markerClusterOptions(),popup = ~primary_type) %>%
+    addLayersControl(overlayGroups = c("Assault","Criminal Damage", "Deceptive Practice", "Narcotics","Robberies", "Thefts", "Violent Crimes", "Weapon Violations"),options = layersControlOptions(collapsed = FALSE))
+
+```
+
+
+Por ultimo en esta sección vamos a ver una primera relación entre los porcentajes de arrestos según crimen y según el distrito. 
+
+También muestro como se distribuyen los crímenes a lo largo de los últimos 5 años.
+
+```{r}
+crimes <- ggplot(data = chicago_crime_subset, aes(x = factor(year), fill = primary_type))+
+    geom_bar(stat = "count",position="dodge")+theme_classic()+
+    xlab("Year")+
+    ylab("Number of occurrences")+labs(fill = "Type of crimes")+
+    scale_fill_brewer(palette="YlOrRd")
+ggplotly(crimes)
+
+barplot(table(chicago_crime_subset$primary_type), main="Arrestos por Tipo de Crimen", legend.text=FALSE, ylim=c(0,400000), las=2)
+par(new=T)
+barplot(table((chicago_crime_subset %>% filter(arrest == "TRUE"))[3]), legend.text=FALSE, col='blue', ylim=c(0,400000), las=2)
+legend(x="top", legend=c("No arresto","Arresto"),
+       fill=c("grey","blue")) 
+
+barplot(table(chicago_crime_subset$district), main="Arrestos por Distrito", legend.text=FALSE, ylim=c(0,75000), las=2)
+par(new=T)
+barplot(table((chicago_crime_subset %>% filter(arrest == "TRUE"))[6]), legend.text=FALSE, col='blue', ylim=c(0,75000), las=2)
+legend(x="top", legend=c("No arresto","Arresto"),
+       fill=c("grey","blue"))
+```
+
+
+## CONCLUSIONES II
+
+  - A lo largo de los años, los crimenes de armas han crecido ligeramente, al igual que los asaltos. Los delitos de daños y robos con violencia han bajado un poco y los de narcoticos también, aunque el cambio mas significativo fue de 2015 a 2016. Robos sin violencia, fraude y crimenes violentos se han mantenido constantes a lo largo de los ultimos 5 años.
+  
+  - En cuanto al porcentaje de arrestos por crimen, parece muy claro que hay un porcentaje muchísimo mayor para narcoticos y crimenes de armas que para el resto. De hecho, mientras que para narcoticos es de mas del 90%, para crimenes de armas de mas del 75%, en el resto de crimenes es de menos del 30%. Muy significativo es que para robos sin violencia y fraude, los delitos situados en la zona menos desfavorecida de la ciudad (Distritos 1,2,18 y 19), el porcentaje es de menos del 20%.
+  
+  - El porcentaje por distritos concuerda bastante con los resultados anteriores ya que los distritos con porcentajes mas altos son el 11, 10 (Narcoticos y Armas) y los del sur. Es bastante llamativo que también ocurre lo mismo en el 1, cuando los crimenes mas comunes no son esos. En mi opinión creo que esto se debe a que aunque en menos medida que otros distritos, sigue habiendo crimenes de narcoticos. Además, la subida de la influencia de asaltos en ese distrito puede tener algo que ver también.
+ 
+## *Estadistica*
+
+```{r}
+year <- table(chicago_crime_subset$year) 
+print("Media de Crímenes por Año")
+mean(year)
+print("Mínimo de Crimenes en un Año")
+min(year)
+print("Maximo de Crimenes en un Año")
+max(year)
+print("Mediana de los Crimenes")
+median(year)
+print("1er Cuartil de Crímenes por Año")
+quantile(year,0.25)
+print("3er Cuartil de Crímenes por Año")
+quantile(year,0.75)
+
+#BoxPlot
+boxplot(c(year), las=2, main = "Crimenes por Año", col="orange")
+grid(nx = NA, ny = NULL)
+
+arrest <- c((chicago_crime_subset %>% filter(arrest == T))[9], (chicago_crime_subset %>% filter(arrest == F))[9])
+boxplot(
+  c(table(arrest[1]$year)),
+  c(table(arrest[2]$year)),
+  names = c("Arrestos", "No Arrestos"),
+  las=1, main = "Comparacion de Arrestos y No Arrestos", col="orange"
+)
+grid(nx = NA, ny = NULL)
+
+
+crimenes <- c((chicago_crime_subset %>% filter(primary_type == "ASSAULT"))[9],(chicago_crime_subset %>% filter(primary_type == "CRIMINAL DAMAGE"))[9],(chicago_crime_subset %>% filter(primary_type == "DECEPTIVE PRACTICE"))[9],(chicago_crime_subset %>% filter(primary_type == "NARCOTICS"))[9],(chicago_crime_subset %>% filter(primary_type == "ROBBERY"))[9],(chicago_crime_subset %>% filter(primary_type == "THEFT"))[9],(chicago_crime_subset %>% filter(primary_type == "VIOLENT CRIME"))[9],(chicago_crime_subset %>% filter(primary_type == "WEAPONS VIOLATION"))[9])
+
+boxplot(
+  c(table(crimenes[1]$year)),
+  c(table(crimenes[2]$year)),
+  c(table(crimenes[3]$year)),
+  c(table(crimenes[4]$year)),
+  c(table(crimenes[5]$year)),
+  c(table(crimenes[6]$year)),
+  c(table(crimenes[7]$year)),
+  c(table(crimenes[8]$year)),
+  names = c("ASSAULT", "CRIMINAL DAMAGE", "DECEPTIVE PRACTICE", "NARCOTICS", "ROBBERY", "THEFT", "VIOLENT CRIME", "WEAPONS VIOLATION"),
+  las=1, main = "Comparacion de cada crimen", col="orange"
+)
+grid(nx = NA, ny = NULL)
+
+```
+
+
+## CONCLUSIONES III
+
+  - Los estadisticos muestran que el numero de crimenes por año es bastante similar en los ultimos 5 años, hay poca variacion de año a año.
+  
+  - Esto se confirma con el primer boxplot, que no muestra ningun outlier y la variacion es de 8.000 crimenes del año con menos crímenes al que mas. Teniendo en cuenta que hay alrededor de 200.000 crímenes por año, es una variación pequeña.
+  
+  - En cuanto a arrestos, a lo largo de los años los números es similar.
+  
+  - En cuanto a crimenes, crimenes de daños, narcoticos y crimenes violentos tienen outliers superiores en algún año y fraude por abajo. El resto su distribución es similar a lo largo de estos 5 años. En el apartado *CONCLUSIONES II* se intuía esto y mas o menos se ha cumplido.
+
+## *Probabilidades*
+
+### Relacion y Tablas de Probabilidad de Crimenes y Distritos
+
+```{r}
+#chicago_crime_subset$district <- factor(chicago_crime_subset$district)
+#chicago_crime_subset$primary_type <- factor(chicago_crime_subset$primary_type)
+#chicago_crime_subset$arrest <- factor(chicago_crime_subset$arrest)
+chicago_crime_subset$month <- factor(chicago_crime_subset$month)
+
+mosaicplot(primary_type ~ district, data = chicago_crime_subset)
+table(chicago_crime_subset$primary_type, chicago_crime_subset$district)
+addmargins(table(chicago_crime_subset$primary_type, chicago_crime_subset$district))
+prop.table(table(chicago_crime_subset$primary_type, chicago_crime_subset$district))
+addmargins(prop.table(table(chicago_crime_subset$primary_type, chicago_crime_subset$district)))
+```
+A pesar de ser porcentajes muy bajos. Las principales conclusiones obtenidas en los apartados anteriores se mantienen, por ejemplo, vemos como el 2% del total de los crimenes son en el distrito 11 y de drogas y que, por ejemplo el 3.5% de los crimenes son robos sin violencia en el distrito 1, otra de las conclusiones obtenidas anteriormente.
+
+
+### Relacion y Tablas de Probabilidad de Crimenes y Arrestos
+
+```{r}
+mosaicplot(primary_type ~ arrest, data = chicago_crime_subset)
+table(chicago_crime_subset$primary_type, chicago_crime_subset$arrest)
+addmargins(table(chicago_crime_subset$primary_type, chicago_crime_subset$arrest))
+prop.table(table(chicago_crime_subset$primary_type, chicago_crime_subset$arrest))
+addmargins(prop.table(table(chicago_crime_subset$primary_type, chicago_crime_subset$arrest)))
+```
+
+Relacionando los crimenes con los arrestos también se ve como robos sin violencia y fraudes tienen muy poca tasa de arrestos mientras que crimenes mas violentos como pueden ser armas o drogas tienen una tasa de arresto mucho mayor.
+
+### Relacion y Tablas de Probabilidad de Crimenes y Meses
+
+```{r}
+mosaicplot(primary_type ~ month, data = chicago_crime_subset)
+table(chicago_crime_subset$primary_type, chicago_crime_subset$month)
+addmargins(table(chicago_crime_subset$primary_type, chicago_crime_subset$month))
+prop.table(table(chicago_crime_subset$primary_type, chicago_crime_subset$month))
+addmargins(prop.table(table(chicago_crime_subset$primary_type, chicago_crime_subset$month)))
+```
+
+En cuanto  a los crimenes por meses, si uno se fija en el gráfico de mosaico, no se puede sacar mucha información, pero si nos fijamos en la line SUM de las tablas por meses, se ve que hay un ligero aumento de crimenes en los meses de verano. En los meses mas fríos (Recordemos que en Chicago en invierno hace mucho frío, con medias de temperaturas en los meses de Enero y Febrero de hasta -15º C), la tasa de crimen en un mes es de un 6%-7% (Enero, Febrero) mientras que en los meses de verano (Julio-Agosto) llega a casi un 9.5%.
+
+### Relacion y Tablas de Probabilidad de Arrestos y Distritos
+
+```{r}
+mosaicplot(arrest ~ district, data = chicago_crime_subset)
+table(chicago_crime_subset$arrest, chicago_crime_subset$district)
+addmargins(table(chicago_crime_subset$arrest, chicago_crime_subset$district))
+prop.table(table(chicago_crime_subset$arrest, chicago_crime_subset$district))
+addmargins(prop.table(table(chicago_crime_subset$arrest, chicago_crime_subset$district)))
+```
+
+En cuanto a arrestos y distritos se ve claramente como los distritos donde drogas y armas son los crímenes mas comunes tienen la tasa de arresto mas alta.
+
+### Probabilidad de que un crimen en el distrito 11 sea de Narcóticos
+
+```{r}
+# Usando dplyr
+
+chicago_crime_subset %>% 
+  count(district, primary_type) %>%
+  group_by(district) %>%
+  mutate(proporcion = prop.table(n))
+
+distrito = chicago_crime_subset %>% 
+  select(district,primary_type) %>%
+  filter(district == "11")
+
+prop.table(table(distrito$primary_type))
+
+chicago_crime_subset %>% 
+  count(district, primary_type) %>%
+  group_by(district) %>%
+  mutate(proporcion = prop.table(n))
+
+distrito = chicago_crime_subset %>% 
+  select(district,primary_type) %>%
+  filter(district == "1")
+
+prop.table(table(distrito$primary_type))
+```
+
+La probabilidad de que un crimen del distrito 11 sea de drogas es la mayor de todas, como esperabamos con un 30.5%. Es superior incluso a robos sin violencia que, teniendo en cuenta que hay entre 4 y 5 veces mas crimenes de ese tipo totales que de drogas resalta aún mas la gran incidencia de los narcoticos en el oeste de la ciudad. Si lo comparamos con el distrito uno, el porcentaje de crimenes de drogas es de 1.3%, muchísimo menor que en el 11, y el de robos sin violencia es de un 55%.
+
+### Probabilidad de que un crimen en el distrito 11 acabe en arresto. Comparación con el resto de distritos
+
+```{r}
+chicago_crime_subset %>% 
+  count(district, arrest) %>%
+  group_by(district) %>%
+  filter(district == "11") %>%
+  mutate(proporcion = prop.table(n))
+
+chicago_crime_subset %>% 
+  count(district, arrest) %>%
+  group_by(district) %>%
+  mutate(proporcion = prop.table(n))
+
+chicago_crime_subset %>% 
+  count(district, arrest) %>%
+  group_by(district) %>%
+  filter(district == "1") %>%
+  mutate(proporcion = prop.table(n))
+
+chicago_crime_subset %>% 
+  count(district, arrest) %>%
+  group_by(district) %>%
+  mutate(proporcion = prop.table(n))
+  
+```
+
+La probabilidad de que se produzca un arresto es de un 42%, que teniendo en cuenta que el resto de distritos tienen una media de un 20% aproximadamente (Sin contar los distritos 10 y 15, que estan tambien muy afectados por las drogas y su tasa es del 30%), también demuestra la gran importancia de los crimenes de drogas en esta zona. Si lo comparamos con el distrito 1, la diferencia es abismal, teniendo este último una tasa de arrestos de un 17.7%.
+
+### Cual es la probabilidad de que sea a la vez un crimen de armas y en el distrito 18? Y en ese caso, cual es la proporcion de arrestos? Comparación con un distrito del sur.
+
+```{r}
+prop.table(table(chicago_crime_subset$primary_type))
+addmargins(prop.table(table(chicago_crime_subset$primary_type, chicago_crime_subset$district)))
+
+chicago_crime_subset %>% 
+  count(district, arrest, primary_type) %>%
+  group_by(district, primary_type) %>%
+  filter(district == "18") %>%
+  filter(primary_type == "WEAPONS VIOLATION") %>%
+  mutate(proporcion = prop.table(n))
+
+chicago_crime_subset %>% 
+  count(district, arrest, primary_type) %>%
+  group_by(district, primary_type) %>%
+  filter(district == "8") %>%
+  filter(primary_type == "WEAPONS VIOLATION") %>%
+  mutate(proporcion = prop.table(n))
+```
+
+La probabilidad de que sea un crimen de armas en un distrito rico como el 18 (Near-north side) es de un 0.02%, una tasa bajísima si lo comparamos con la probabilidad de que se de en un distrito del sur como puede ser el 8, que tiene una probabilida de un 0.1% una probabilidad 5 veces mayor. Por otra parte, se ve que los crimenes mas violentos en los distritos mas acomodados están mas controlados, teniendo en cuenta que la tasa de arrestos en el 18 es un 10% mayor.
+
+### Son indepedientes todos estos factores?
+
+```{r}
+print("Independencia de Crimenes y Arrestos")
+chisq.test(chicago_crime_subset$primary_type,chicago_crime_subset$arrest)
+
+print("Independencia de Distritos y Arrestos")
+chisq.test(chicago_crime_subset$district,chicago_crime_subset$arrest)
+
+print("Independencia de Crimenes y Distritos")
+chisq.test(chicago_crime_subset$primary_type,chicago_crime_subset$district)
+
+print("Independencia de Crimenes y Meses")
+chisq.test(chicago_crime_subset$primary_type,chicago_crime_subset$month)
+
+print("Independencia de Arrestos y Meses")
+chisq.test(chicago_crime_subset$arrest,chicago_crime_subset$month)
+
+print("Independencia de Distritos y Meses")
+chisq.test(chicago_crime_subset$district,chicago_crime_subset$month)
+
+```
+
+El pValor es muy pequeño por lo que se rechaza que los factores son independientes (hipotesis nula). Por ello, considero que la dependencia de los crimenes con los distritos y los arrestos son completamente dependientes y esa relacion debe ser estudiada para hallar posibles soluciones.
+
+
+## Correlación Entre Distritos, Arrestos y Crímenes
+
+En esta seccion se va a mostrar como estan relacionados los crimenes con los arrestos y los distritos. Esto sirve de apoyo para confirmar las teorías anteriormente expuestas de una forma gráfica.
+
+En estos primeros gráficos se ven esas relaciones por separado.
+
+```{r}
+ggplot(data = chicago_crime_subset) +
+  geom_count(mapping = aes(x = primary_type, y = district)) + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggplot(data = chicago_crime_subset) +
+  geom_count(mapping = aes(x = arrest, y = primary_type)) + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggplot(data = chicago_crime_subset) +
+  geom_count(mapping = aes(x = arrest, y = district)) + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+En estos diagramas se ve la incidencia de las relaciones que se llevan estudiando durante el análisis completo.
+
+En el primero se ve como los robos sin violencia es el crimen mas común en la ciudad, en general. Mientras, otrr crimen no violento como fraude, destaca en los distritos mas ricos como el 1, 18 y 19. Los delitos mas violentos como drogas, daños o armas estan bastante focalizados en el sur y el oeste (Sobre todo las drogas)
+
+En cuanto a arrestos y crímenes, se ve que en los crimenes no violentos, la diferencia de arrestos y no arrestos es considerable. Lo mismo pasa con delitos mas violentos pero en menor medida, como los asaltos y los crimenes violentos. Como hemos visto a lo largo del documento, las drogas y las armas tienen una tasa de arresto mucho mayor que el resto.
+
+Por último, solo en los distritos 11 y 15 la tasa de arrestos es positiva, coincidiendo con los mas afectados por drogas y armas, respectivamente.
+
+Ahora, muestro en el mismo gráfico esas relaciones con la probabilidad de arresto en cada caso. Cuanto mas turquesa, mas probabilidad de que se produzca un arresto.
+
+```{r}
+ggplot(data = chicago_crime_subset, aes(x=primary_type, y=district, fill=arrest)) + 
+  geom_tile() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Correlacion
+ggplot(chicago_crime_subset,aes(x=district,y=primary_type,color=arrest))+geom_point(alpha=0.5)
+```
+
+En estos graficos podemos ver con mas claridad las relaciones anteriores.
+
+## *CONCLUSIONES FINALES*
+
+### *Por Crimen*
+
+Analizando crimen a crimen voy a exponer ahora mis conclusiones finales basados en todo el analisis.
+
+  - *ASALTO*: Este crimen es el que mas duda me genera, pero haciendo un analisis particular espero aclarar esas dudas a continuación. Parece extraño ya que el crimen esta repartido bastante equitativamente entre los distritos del sur (pobres) y los mas ricos (1, 18, 19, 24), algo muy extraño como vemos en el resto de crimenes excepto (en menor medida) en crimenes violentos, que pasa algo similar.
+  
+  - *CRIMENES DE DAÑOS*: Este crimen esta repartido mayoritariamente en distritos del sur y oeste y en casi todos los distritos exceptuando el 2 y 5 tiene una tasa de arrestos muy baja.
+  
+  - *FRAUDE*: Uno de los crimenes junto a robos sin violencia que se situan mayoritariamente en barrios ricos, donde la tasa de arrestos es considerablemente baja.
+  
+  - *DROGAS*: El crimen donde el análisis es mas fructífero. Practicamente la totalidad de crimenes de este tipo se dan en los distritos 10, 11 y 15, situados al oeste de la ciudad. Además es, con mucha diferencia el crimen que mas controlado tiene la policia, arrestando a mas del 90% de criminales de este tipo.
+  
+  - *ROBOS CON VIOLENCIA*: Gracias a este último gráfico, nos damos cuenta que este crimen tiene una tasa bastante positiva de arrestos, algo que anteriormente se me habia pasado por alto. Como la mayoría de crimenes violentos, esta repartido mayoritariamente en el sur de la ciudad y el oeste.
+  
+  - *ROBOS SIN VIOLENCIA*: Al no ser un crimen violento, esta localizado en el centro y norte de la ciudad, las "zonas seguras". Además, la tasa de arrestos es ridicula para ser el crimen mas extendido de la ciudad.
+  
+  - *CRIMENES VIOLENTOS*: Este es otro crimen, como los robos con violencia, donde la tasa de arrestos es algo superior a lo que pensaba, sobretodo teniendo en cuenta que ocurre en ditritos del norte como el 19 y el 22, distritos favorecidos economicamente y tradicionalmente con una tasa muy baja de arrestos.
+  
+  - *ARMAS*: Como los crímenes de drogas, el otro crimen que mas facilmente podemos clasificar. Un crimen exclusivamente del sur de la ciudad y con una tasa de arrestos mucho mayor que la media.
+
+### *Generales*
+
+  1. La primera conclusion que saco es la diferencia de arrestos respecto a crimenes violentos y crímenes menos violentos. La tasa de arrestos de los robos con violencia, drogas, armas e incluso crimenes violentos de por si, es mucho mayor a robos sin violencia y fraude.
+  
+  2. Puedo localizar casi inequívocamente tanto los crimenes de drogas (Distritos 10 y 11), armas (Distritos del sur y el 11), fraude (1 (Centro de la ciudad), 18 y 19) y robo sin violencia (1, 18 y 19).
+  
+  3. Los crímenes violentos siguen, geográficamente hablando, a las dificultades económicas. Tradicionalmente las zonas pobres de Chicago son el sur (La serie de television "Shameless" lo ejemplifica bastante bien) y el oeste, siendo estos los barrios tradicionalmente latinos. Como se ve claramente a lo largo de este análisis, los crimenes mas violentos se situan en estas zonas.
+  
+  4. Los crímenes menos violentos se producen en las zonas mas acomodadas, donde las autoridades están mejor financiadas y tratan de contener mejor los crímenes mas violentos.
+  
+  5. El fraude se produce, lógicamente, en los distritos financieros de la ciudad que son el 1 (Popularmente llamado "Loop"), 18 y 19, donde se situan tanto los mas ricos de la ciudad como la totalidad de grandes empresas.
+
+## *QUE PASA CON LOS ASALTOS?*
+
+Hay una teoría muy arraigada en la ciudad de Chicago que dice que la violencia sube del sur al norte a través de la Red Line del CTA, el transporte público de Chicago. Esta teoría es bastante real, como se puede ver en los siguientes artículos: https://www.chicagotribune.com/investigations/ct-cta-l-crime-up-arrests-down-20190919-lu2n2mc2i5akhdrhatuexp72oy-story.html y https://www.chicagotribune.com/business/transportation/ct-biz-cta-crime-spike-new-patrols-20200110-6nihubfvsjgalf337xqxbme3bq-story.html
+
+Voy a intentar ver si esta teoría puede explicar el comportamiento extraño en los crímenes de asalto y, en menor medida los crimenes violentos.
+
+Lo primero es situar los crímenes de asaltos y crímenes violentos en el mapa.
+
+```{r}
+assault <- na.omit(assault)
+setDT(assault)
+
+## MAKE CONTOUR LINES
+## Assault
+kde_assault <- bkde2D(assault[ , list(longitude, latitude)],
+              bandwidth=c(.0001, .0001), gridsize = c(75,75))
+CL_assault <- contourLines(kde_assault$x1 , kde_assault$x2 , kde_assault$fhat)
+
+## EXTRACT CONTOUR LINE LEVELS
+LEVS_assault<- as.factor(sapply(CL_assault, `[[`, "level"))
+NLEV_assault <- length(levels(LEVS_assault))
+
+## CONVERT CONTOUR LINES TO POLYGONS
+pgons_assault <- lapply(1:length(CL_assault), function(i)
+    Polygons(list(Polygon(cbind(CL_assault[[i]]$x, CL_assault[[i]]$y))), ID=i))
+spgons_assault = SpatialPolygons(pgons_assault)
+
+## Violent Crimes
+setDT(violent_crime)
+kde_vc <- bkde2D(violent_crime[ , list(longitude, latitude)],
+              bandwidth=c(.0001, .0001), gridsize = c(75,75))
+CL_vc <- contourLines(kde_vc$x1 , kde_vc$x2 , kde_vc$fhat)
+
+## EXTRACT CONTOUR LINE LEVELS
+LEVS_vc<- as.factor(sapply(CL_vc, `[[`, "level"))
+NLEV_vc <- length(levels(LEVS_vc))
+
+## CONVERT CONTOUR LINES TO POLYGONS
+pgons_vc <- lapply(1:length(CL_vc), function(i)
+    Polygons(list(Polygon(cbind(CL_vc[[i]]$x, CL_vc[[i]]$y))), ID=i))
+spgons_vc = SpatialPolygons(pgons_vc)
+
+leaflet() %>% addTiles() %>%
+    addPolygons(data = spgons_vc, color = brewer.pal(NLEV_vc, name = "RdPu")[LEVS_vc], group = "Violent Crimes") %>%
+    addPolygons(data = spgons_assault, color = brewer.pal(NLEV_assault, name = "YlOrRd")[LEVS_assault], group = "Assault") %>%
+    addLayersControl(overlayGroups = c("Assault", "Violent Crimes"),options = layersControlOptions(collapsed = FALSE))
+```
+
+En los mapas se ven claramente como estos crimenes se reparten en una linea mas o menos vertical cuasi paralela a la costa.
+
+Ahora vamos a situar en el mapa los crimenes que ocurren en plataformas de metro (CTA PLATFORM) y la linea roja de metro, que es la que queremos estudiar. Los datos de las localizaciones de las plataformas las sacamos de: https://data.cityofchicago.org/Transportation/CTA-System-Information-List-of-L-Stops/8pix-ypme
+
+```{r}
+## Lo primero es situar los cmimenes en el metro en un mapa
+## Ahora leo el dataset de las localizaciones de las paradas y selecciono las correspondientes a la línea roja, que es la que va de norte a sur.
+cta_locations <- read.csv(file = "Datos/CTA_Stops.csv", #Name of text file.
+                      sep = ",",                       #Separation character.
+                      header = TRUE,                   #If column names are in the first row.
+                      na.strings = "NA",               #Character to be marked as missing value.
+                      stringsAsFactors = FALSE)
+
+cta_locations <- cta_locations %>% tidyr::extract(Location, c("Latitude", "Longitude"), "\\(([^,]+), ([^)]+)\\)")
+cta_locations$Latitude <- as.numeric(cta_locations$Latitude)
+cta_locations$Longitude <- as.numeric(cta_locations$Longitude)
+
+red_line <- subset(cta_locations, RED == "true")
+red_line$Latitude <- as.numeric(red_line$Latitude)
+red_line$Longitude <- as.numeric(red_line$Longitude)
+
+setDT(red_line)
+
+leaflet()%>%
+  addTiles() %>%
+    addPolygons(data = spgons_assault, color = brewer.pal(NLEV_assault, name = "YlOrRd")[LEVS_assault], group = "Assault") %>%
+    addPolygons(data = spgons_vc, color = brewer.pal(NLEV_vc, name = "YlGn")[LEVS_vc], group = "Violent Crimes") %>%
+    addCircles(data = red_line, color = brewer.pal(2, name = "YlOrRd")[3], group = "Red Line") %>%
+    addCircles(data = cta_locations, color = brewer.pal(2, name = "RdPu")[3], group = "All Lines") %>%
+    addLayersControl(overlayGroups = c("Assault","Violent Crimes", "All Lines","Red Line"),options = layersControlOptions(collapsed = FALSE))
+```
+
+Como se ve comparando las diferentes opciones del mapa, la línea roja del CTA es donde mas crímenes hay. Se comprueba además que esta línea atraviesa la ciudad de sur a norte y viceversa, de la zona mas pobre a la mas rica, por lo que tiene bastante sentido que la violencia y criminalidad avance en esa dirección. Esta explicación podría servir como razón para explicar porque razón no se ha podido sacar un análisis mas preciso de lo que ocurre con los asaltos y, en menor medida, los crimenes violentos.
+
+# CONCLUSIONES SEGÚN MODELOS
+
+```{r}
+district11 = chicago_crime_subset %>%
+  filter(district==11)
+
+(modelo11 = lm(primary_type ~  arrest, data=district11))
+
+district8 = chicago_crime_subset %>%
+  filter(district==8)
+
+(modelo8 = lm(primary_type ~  arrest, data=district8))
+
+district1 = chicago_crime_subset %>%
+  filter(district==1)
+
+(modelo1 = lm(primary_type ~  arrest, data=district1))
+
+plot(x = chicago_crime_subset$primary_type, y=chicago_crime_subset$arrest)
+abline(modelo11, col="green")
+abline(modelo8, col="red")
+abline(modelo1, col="blue")
+
+(modelo11_log = glm(primary_type ~ arrest, data = district11, family = binomial(link=logit)))
+(modelo8_log = glm(primary_type ~ arrest, data = district8, family = binomial(link=logit)))
+(modelo1_log = glm(primary_type ~ arrest, data = district1, family = binomial(link=logit)))
+```
+
+Como se ve en los tres diferentes modelos, tanto el modelo lineal como el logístico confirman las teorias que he ido proponiendo a lo largo del análisis. El distrito 11 tiene una probabilidad de arresto mucho mayor que los del sur y los del centro, siendo la tasa de los del sur algo mayor a la del centro y norte de la ciudad, hecho que se ve claramente en los modelos logísiticos. Esto, según se ha demostrado anteriormente, se debe a la distribución de crímenes en cada distrito.
+
+```{r}
+arrest_true = chicago_crime_subset %>%
+  filter(arrest=="TRUE")
+
+(modelo_true = lm(primary_type ~  district, data=arrest_true))
+
+arrest_false = chicago_crime_subset %>%
+  filter(arrest=="FALSE")
+
+(modelo_false = lm(primary_type ~  district, data=arrest_false))
+
+plot(x = chicago_crime_subset$primary_type, y=chicago_crime_subset$district)
+abline(arrest_true, col="green")
+abline(arrest_false, col="red")
+
+(modelo_true_log = glm(primary_type ~ district, data = arrest_true, family = binomial(link=logit)))
+(modelo_false_log = glm(primary_type ~ district, data = arrest_false, family = binomial(link=logit)))
+```
+
+Analizando el modelo lineal comparando los distritos y los tipos de crimen, no se puede extraer ninguna conclusión. Sin embargo, analizando el modelo logísitico, se ve claramente que los distrito con los arrestos mas probables son los mas afectados por drogas y armas, el 10,11 y 15.
+
+## NORMALIDAD
+
+La hago aqui porque hay que hacer transformaciones de variables que solo afectan a este apartado
+
+```{r}
+chicago_crime_subset$primary_type <- as.factor(chicago_crime_subset$primary_type)
+
+chicago_crime_subset$primary_type <- as.numeric(chicago_crime_subset$primary_type)
+chicago_crime_subset$district <- as.numeric(chicago_crime_subset$district)
+chicago_crime_subset$month <- as.numeric(chicago_crime_subset$month)
+
+qqnorm(chicago_crime_subset$district)
+qqline(chicago_crime_subset$district)
+
+qqnorm(chicago_crime_subset$primary_type)
+qqline(chicago_crime_subset$primary_type)
+
+qqnorm(chicago_crime_subset$month)
+qqline(chicago_crime_subset$month)
+```
+
+Ninguna de las variables se podría considerar como normal
+
